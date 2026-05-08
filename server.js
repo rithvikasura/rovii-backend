@@ -221,8 +221,9 @@ io.on('connection', (socket) => {
     });
 
     socket.on('send-message', async ({ groupId, msg }) => {
-        const serverTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        const messageWithTime = { ...msg, time: serverTime };
+        const now = new Date();
+        const serverTime = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+        const messageWithTime = { user: msg.user, text: msg.text, time: serverTime };
         await db.run('INSERT INTO group_messages (groupId, username, text, time) VALUES (?, ?, ?, ?)', 
             [groupId, msg.user, msg.text, serverTime]);
         io.to(groupId).emit('new-message', messageWithTime);
@@ -234,7 +235,8 @@ io.on('connection', (socket) => {
     });
 
     socket.on('private-message', async ({ to, from, text }) => {
-        const serverTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const now = new Date();
+        const serverTime = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
         await db.run('INSERT INTO private_messages (from_user, to_user, text, time) VALUES (?, ?, ?, ?)',
             [from, to, text, serverTime]);
         
