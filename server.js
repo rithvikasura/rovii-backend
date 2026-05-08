@@ -1,4 +1,4 @@
-    const express = require('express');
+const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
@@ -43,12 +43,21 @@ let db;
             username TEXT,
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE TABLE IF NOT EXISTS messages (
+        CREATE TABLE IF NOT EXISTS group_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             groupId TEXT,
             username TEXT,
             text TEXT,
             time TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS private_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user TEXT,
+            to_user TEXT,
+            text TEXT,
+            time TEXT,
+            is_read INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     `);
@@ -125,16 +134,37 @@ app.post('/api/update-username', async (req, res) => {
     await db.run('UPDATE users SET username = ?, profile_pic = ? WHERE username = ?', [newUsername, pic ? pic.profile_pic : null, oldUsername]);
     await db.run('UPDATE sessions SET username = ? WHERE username = ?', [newUsername, oldUsername]);
     await db.run('UPDATE group_members SET username = ? WHERE username = ?', [newUsername, oldUsername]);
-    await db.run('UPDATE messages SET username = ? WHERE username = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE group_messages SET username = ? WHERE username = ?', [newUsername, oldUsername]);
     await db.run('UPDATE groups SET admin = ? WHERE admin = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE private_messages SET from_user = ? WHERE from_user = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE private_messages SET to_user = ? WHERE to_user = ?', [newUsername, oldUsername]);
     
     res.json({ success: true, newUsername });
 });
 
-// Socket events
+app.get('/api/private-messages', async (req, res) => {
+    let { user1, user2 } = req.query;
+    let msgs = await db.all(
+        `SELECT from_user, to_user, text, time FROM private_messages 
+         WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
+         ORDER BY created_at`,
+        [user1, user2, user2, user1]
+    );
+    res.json({ messages: msgs });
+});
+
+const onlineUsers = new Map();
+
 io.on('connection', (socket) => {
     let currentUser = null;
     let currentGroup = null;
+
+    socket.on('register-user', ({ username }) => {
+        currentUser = username;
+        onlineUsers.set(socket.id, username);
+        socket.username = username;
+        console.log(`${username} connected`);
+    });
 
     socket.on('create-group', async ({ userId }) => {
         currentUser = userId;
@@ -145,7 +175,7 @@ io.on('connection', (socket) => {
         currentGroup = groupId;
         socket.emit('group-created', groupId);
         
-        let msgs = await db.all('SELECT username, text, time FROM messages WHERE groupId = ? ORDER BY id', [groupId]);
+        let msgs = await db.all('SELECT username, text, time FROM group_messages WHERE groupId = ? ORDER BY id', [groupId]);
         socket.emit('old-messages', msgs || []);
         updateOnlineUsers(groupId);
     });
@@ -166,7 +196,7 @@ io.on('connection', (socket) => {
             socket.emit('sync-video', { videoId: group.current_video });
         }
         
-        let msgs = await db.all('SELECT username, text, time FROM messages WHERE groupId = ? ORDER BY id', [groupId]);
+        let msgs = await db.all('SELECT username, text, time FROM group_messages WHERE groupId = ? ORDER BY id', [groupId]);
         socket.emit('old-messages', msgs || []);
         updateOnlineUsers(groupId);
     });
@@ -179,13 +209,13 @@ io.on('connection', (socket) => {
         if (group && group.current_video) {
             socket.emit('sync-video', { videoId: group.current_video });
         }
-        let msgs = await db.all('SELECT username, text, time FROM messages WHERE groupId = ? ORDER BY id', [groupId]);
+        let msgs = await db.all('SELECT username, text, time FROM group_messages WHERE groupId = ? ORDER BY id', [groupId]);
         socket.emit('old-messages', msgs || []);
         updateOnlineUsers(groupId);
     });
 
     socket.on('send-message', async ({ groupId, msg }) => {
-        await db.run('INSERT INTO messages (groupId, username, text, time) VALUES (?, ?, ?, ?)', 
+        await db.run('INSERT INTO group_messages (groupId, username, text, time) VALUES (?, ?, ?, ?)', 
             [groupId, msg.user, msg.text, msg.time]);
         io.to(groupId).emit('new-message', msg);
     });
@@ -195,7 +225,26 @@ io.on('connection', (socket) => {
         io.to(groupId).emit('sync-video', { videoId });
     });
 
+    socket.on('private-message', async ({ to, from, text, time }) => {
+        await db.run('INSERT INTO private_messages (from_user, to_user, text, time) VALUES (?, ?, ?, ?)',
+            [from, to, text, time]);
+        
+        let targetSocketId = null;
+        for (let [id, username] of onlineUsers.entries()) {
+            if (username === to) {
+                targetSocketId = id;
+                break;
+            }
+        }
+        
+        if (targetSocketId) {
+            io.to(targetSocketId).emit('private-message', { from, text, time });
+        }
+        socket.emit('private-message-sent', { to, text, time });
+    });
+
     socket.on('disconnect', () => {
+        if (currentUser) onlineUsers.delete(socket.id);
         if (currentGroup && currentUser) {
             updateOnlineUsers(currentGroup);
         }
@@ -203,8 +252,11 @@ io.on('connection', (socket) => {
     
     async function updateOnlineUsers(groupId) {
         const roomSockets = await io.in(groupId).fetchSockets();
-        const users = roomSockets.map(s => s.currentUser).filter(Boolean);
-        io.to(groupId).emit('online-users', users);
+        const users = [];
+        for (const s of roomSockets) {
+            if (s.username) users.push(s.username);
+        }
+        io.to(groupId).emit('online-users', [...new Set(users)]);
     }
 });
 
