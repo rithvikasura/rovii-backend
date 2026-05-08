@@ -174,6 +174,7 @@ io.on('connection', (socket) => {
         socket.join(groupId);
         currentGroup = groupId;
         socket.emit('group-created', groupId);
+        socket.emit('admin-status', true);
         
         let msgs = await db.all('SELECT username, text, time FROM group_messages WHERE groupId = ? ORDER BY id', [groupId]);
         socket.emit('old-messages', msgs || []);
@@ -191,6 +192,11 @@ io.on('connection', (socket) => {
         socket.join(groupId);
         currentGroup = groupId;
         socket.emit('joined-group', groupId);
+        
+        let isAdmin = false;
+        let adminCheck = await db.get('SELECT admin FROM groups WHERE groupId = ? AND admin = ?', [groupId, userId]);
+        if(adminCheck) isAdmin = true;
+        socket.emit('admin-status', isAdmin);
         
         if (group.current_video) {
             socket.emit('sync-video', { videoId: group.current_video });
@@ -241,6 +247,29 @@ io.on('connection', (socket) => {
             io.to(targetSocketId).emit('private-message', { from, text, time });
         }
         socket.emit('private-message-sent', { to, text, time });
+    });
+
+    // ✅ Profile pic update broadcast
+    socket.on('profile-pic-updated', async ({ userId, imageData }) => {
+        // Update in database
+        await db.run('UPDATE users SET profile_pic = ? WHERE username = ?', [imageData, userId]);
+        // Broadcast to all users in same groups
+        if (currentGroup) {
+            socket.to(currentGroup).emit('profile-pic-updated', { userId, imageData });
+        }
+    });
+
+    socket.on('leave-group', async ({ groupId, userId }) => {
+        await db.run('DELETE FROM group_members WHERE groupId = ? AND username = ?', [groupId, userId]);
+        socket.leave(groupId);
+        currentGroup = null;
+        updateOnlineUsers(groupId);
+    });
+
+    socket.on('close-group', async ({ groupId }) => {
+        await db.run('DELETE FROM group_members WHERE groupId = ?', [groupId]);
+        await db.run('DELETE FROM groups WHERE groupId = ?', [groupId]);
+        io.to(groupId).emit('group-closed');
     });
 
     socket.on('disconnect', () => {
