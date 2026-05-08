@@ -25,6 +25,8 @@ let db;
             username TEXT PRIMARY KEY,
             password_hash TEXT,
             profile_pic TEXT,
+            mother_name TEXT,
+            father_name TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS sessions (
@@ -60,6 +62,13 @@ let db;
             is_read INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS friend_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user TEXT,
+            to_user TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     `);
     console.log('Database ready');
 })();
@@ -68,14 +77,18 @@ app.get('/', (req, res) => {
     res.json({ message: 'Rovii Backend is running!', status: 'ok' });
 });
 
+// Register with security questions
 app.post('/api/register', async (req, res) => {
-    let { username, password } = req.body;
+    let { username, password, motherName, fatherName } = req.body;
     if (!username || username.length < 3) return res.json({ success: false, message: 'Min 3 chars' });
     if (!password || password.length < 4) return res.json({ success: false, message: 'Min 4 chars' });
     let existing = await db.get('SELECT username FROM users WHERE username = ?', [username]);
     if (existing) return res.json({ success: false, message: 'Username taken' });
     let hashed = await bcrypt.hash(password, 10);
-    await db.run('INSERT INTO users (username, password_hash) VALUES (?, ?)', [username, hashed]);
+    let motherHash = motherName ? await bcrypt.hash(motherName.toLowerCase(), 10) : null;
+    let fatherHash = fatherName ? await bcrypt.hash(fatherName.toLowerCase(), 10) : null;
+    await db.run('INSERT INTO users (username, password_hash, mother_name, father_name) VALUES (?, ?, ?, ?)', 
+        [username, hashed, motherHash, fatherHash]);
     res.json({ success: true });
 });
 
@@ -97,6 +110,21 @@ app.post('/api/verify', async (req, res) => {
         let user = await db.get('SELECT profile_pic FROM users WHERE username = ?', [sess.username]);
         res.json({ valid: true, username: sess.username, profilePic: user ? user.profile_pic : null });
     } else res.json({ valid: false });
+});
+
+app.post('/api/forgot-password', async (req, res) => {
+    let { username, motherName, fatherName, newPassword } = req.body;
+    let user = await db.get('SELECT mother_name, father_name FROM users WHERE username = ?', [username]);
+    if (!user) return res.json({ success: false, message: 'User not found' });
+    
+    let motherMatch = user.mother_name ? await bcrypt.compare(motherName.toLowerCase(), user.mother_name) : false;
+    let fatherMatch = user.father_name ? await bcrypt.compare(fatherName.toLowerCase(), user.father_name) : false;
+    
+    if (!motherMatch || !fatherMatch) return res.json({ success: false, message: 'Security answers incorrect' });
+    
+    let hashed = await bcrypt.hash(newPassword, 10);
+    await db.run('UPDATE users SET password_hash = ? WHERE username = ?', [hashed, username]);
+    res.json({ success: true });
 });
 
 app.get('/user-exists', async (req, res) => {
@@ -131,13 +159,19 @@ app.post('/api/update-username', async (req, res) => {
     if (existing) return res.json({ success: false, message: 'Username taken' });
     
     let pic = await db.get('SELECT profile_pic FROM users WHERE username = ?', [oldUsername]);
-    await db.run('UPDATE users SET username = ?, profile_pic = ? WHERE username = ?', [newUsername, pic ? pic.profile_pic : null, oldUsername]);
+    let mother = await db.get('SELECT mother_name FROM users WHERE username = ?', [oldUsername]);
+    let father = await db.get('SELECT father_name FROM users WHERE username = ?', [oldUsername]);
+    
+    await db.run('UPDATE users SET username = ?, profile_pic = ?, mother_name = ?, father_name = ? WHERE username = ?', 
+        [newUsername, pic ? pic.profile_pic : null, mother ? mother.mother_name : null, father ? father.father_name : null, oldUsername]);
     await db.run('UPDATE sessions SET username = ? WHERE username = ?', [newUsername, oldUsername]);
     await db.run('UPDATE group_members SET username = ? WHERE username = ?', [newUsername, oldUsername]);
     await db.run('UPDATE group_messages SET username = ? WHERE username = ?', [newUsername, oldUsername]);
     await db.run('UPDATE groups SET admin = ? WHERE admin = ?', [newUsername, oldUsername]);
     await db.run('UPDATE private_messages SET from_user = ? WHERE from_user = ?', [newUsername, oldUsername]);
     await db.run('UPDATE private_messages SET to_user = ? WHERE to_user = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE friend_requests SET from_user = ? WHERE from_user = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE friend_requests SET to_user = ? WHERE to_user = ?', [newUsername, oldUsername]);
     
     res.json({ success: true, newUsername });
 });
@@ -151,6 +185,44 @@ app.get('/api/private-messages', async (req, res) => {
         [user1, user2, user2, user1]
     );
     res.json({ messages: msgs });
+});
+
+// Friend request endpoints
+app.post('/api/send-friend-request', async (req, res) => {
+    let { from, to } = req.body;
+    let existing = await db.get('SELECT * FROM friend_requests WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)', 
+        [from, to, to, from]);
+    if (existing) return res.json({ success: false, message: 'Request already sent' });
+    await db.run('INSERT INTO friend_requests (from_user, to_user) VALUES (?, ?)', [from, to]);
+    res.json({ success: true });
+});
+
+app.get('/api/friend-requests', async (req, res) => {
+    let { username } = req.query;
+    let requests = await db.all('SELECT from_user FROM friend_requests WHERE to_user = ? AND status = "pending"', [username]);
+    res.json({ requests: requests.map(r => r.from_user) });
+});
+
+app.post('/api/accept-friend', async (req, res) => {
+    let { from, to } = req.body;
+    await db.run('UPDATE friend_requests SET status = "accepted" WHERE from_user = ? AND to_user = ?', [from, to]);
+    res.json({ success: true });
+});
+
+app.post('/api/reject-friend', async (req, res) => {
+    let { from, to } = req.body;
+    await db.run('DELETE FROM friend_requests WHERE from_user = ? AND to_user = ?', [from, to]);
+    res.json({ success: true });
+});
+
+app.get('/api/friends', async (req, res) => {
+    let { username } = req.query;
+    let friends = await db.all(
+        `SELECT from_user as friend FROM friend_requests WHERE to_user = ? AND status = "accepted"
+         UNION SELECT to_user as friend FROM friend_requests WHERE from_user = ? AND status = "accepted"`,
+        [username, username]
+    );
+    res.json({ friends: friends.map(f => f.friend) });
 });
 
 const onlineUsers = new Map();
