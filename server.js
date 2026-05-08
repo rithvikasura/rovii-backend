@@ -62,6 +62,12 @@ let db;
             is_read INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS friends (
+            user1 TEXT,
+            user2 TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user1, user2)
+        );
         CREATE TABLE IF NOT EXISTS friend_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             from_user TEXT,
@@ -73,11 +79,20 @@ let db;
     console.log('Database ready');
 })();
 
+function getISTTime() {
+    const now = new Date();
+    const istOffset = 5.5 * 60 * 60 * 1000;
+    const istDate = new Date(now.getTime() + istOffset);
+    const hours = istDate.getUTCHours().toString().padStart(2, '0');
+    const minutes = istDate.getUTCMinutes().toString().padStart(2, '0');
+    const seconds = istDate.getUTCSeconds().toString().padStart(2, '0');
+    return `${hours}:${minutes}:${seconds}`;
+}
+
 app.get('/', (req, res) => {
     res.json({ message: 'Rovii Backend is running!', status: 'ok' });
 });
 
-// Register with security questions
 app.post('/api/register', async (req, res) => {
     let { username, password, motherName, fatherName } = req.body;
     if (!username || username.length < 3) return res.json({ success: false, message: 'Min 3 chars' });
@@ -116,12 +131,9 @@ app.post('/api/forgot-password', async (req, res) => {
     let { username, motherName, fatherName, newPassword } = req.body;
     let user = await db.get('SELECT mother_name, father_name FROM users WHERE username = ?', [username]);
     if (!user) return res.json({ success: false, message: 'User not found' });
-    
     let motherMatch = user.mother_name ? await bcrypt.compare(motherName.toLowerCase(), user.mother_name) : false;
     let fatherMatch = user.father_name ? await bcrypt.compare(fatherName.toLowerCase(), user.father_name) : false;
-    
     if (!motherMatch || !fatherMatch) return res.json({ success: false, message: 'Security answers incorrect' });
-    
     let hashed = await bcrypt.hash(newPassword, 10);
     await db.run('UPDATE users SET password_hash = ? WHERE username = ?', [hashed, username]);
     res.json({ success: true });
@@ -170,6 +182,8 @@ app.post('/api/update-username', async (req, res) => {
     await db.run('UPDATE groups SET admin = ? WHERE admin = ?', [newUsername, oldUsername]);
     await db.run('UPDATE private_messages SET from_user = ? WHERE from_user = ?', [newUsername, oldUsername]);
     await db.run('UPDATE private_messages SET to_user = ? WHERE to_user = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE friends SET user1 = ? WHERE user1 = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE friends SET user2 = ? WHERE user2 = ?', [newUsername, oldUsername]);
     await db.run('UPDATE friend_requests SET from_user = ? WHERE from_user = ?', [newUsername, oldUsername]);
     await db.run('UPDATE friend_requests SET to_user = ? WHERE to_user = ?', [newUsername, oldUsername]);
     
@@ -187,12 +201,17 @@ app.get('/api/private-messages', async (req, res) => {
     res.json({ messages: msgs });
 });
 
-// Friend request endpoints
+// ============ FRIENDS SYSTEM FIXED ============
+
 app.post('/api/send-friend-request', async (req, res) => {
     let { from, to } = req.body;
-    let existing = await db.get('SELECT * FROM friend_requests WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)', 
+    let existingFriend = await db.get('SELECT * FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)', 
         [from, to, to, from]);
-    if (existing) return res.json({ success: false, message: 'Request already sent' });
+    if (existingFriend) return res.json({ success: false, message: 'Already friends' });
+    
+    let existingReq = await db.get('SELECT * FROM friend_requests WHERE from_user = ? AND to_user = ? AND status = "pending"', [from, to]);
+    if (existingReq) return res.json({ success: false, message: 'Request already sent' });
+    
     await db.run('INSERT INTO friend_requests (from_user, to_user) VALUES (?, ?)', [from, to]);
     res.json({ success: true });
 });
@@ -206,6 +225,7 @@ app.get('/api/friend-requests', async (req, res) => {
 app.post('/api/accept-friend', async (req, res) => {
     let { from, to } = req.body;
     await db.run('UPDATE friend_requests SET status = "accepted" WHERE from_user = ? AND to_user = ?', [from, to]);
+    await db.run('INSERT INTO friends (user1, user2) VALUES (?, ?)', [from, to]);
     res.json({ success: true });
 });
 
@@ -217,12 +237,18 @@ app.post('/api/reject-friend', async (req, res) => {
 
 app.get('/api/friends', async (req, res) => {
     let { username } = req.query;
-    let friends = await db.all(
-        `SELECT from_user as friend FROM friend_requests WHERE to_user = ? AND status = "accepted"
-         UNION SELECT to_user as friend FROM friend_requests WHERE from_user = ? AND status = "accepted"`,
+    let friendsList = await db.all(
+        `SELECT user1 as friend FROM friends WHERE user2 = ?
+         UNION SELECT user2 as friend FROM friends WHERE user1 = ?`,
         [username, username]
     );
-    res.json({ friends: friends.map(f => f.friend) });
+    res.json({ friends: friendsList.map(f => f.friend) });
+});
+
+app.post('/api/remove-friend', async (req, res) => {
+    let { user1, user2 } = req.body;
+    await db.run('DELETE FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)', [user1, user2, user2, user1]);
+    res.json({ success: true });
 });
 
 const onlineUsers = new Map();
@@ -293,8 +319,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('send-message', async ({ groupId, msg }) => {
-        const now = new Date();
-        const serverTime = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+        const serverTime = getISTTime();
         const messageWithTime = { user: msg.user, text: msg.text, time: serverTime };
         await db.run('INSERT INTO group_messages (groupId, username, text, time) VALUES (?, ?, ?, ?)', 
             [groupId, msg.user, msg.text, serverTime]);
@@ -307,8 +332,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('private-message', async ({ to, from, text }) => {
-        const now = new Date();
-        const serverTime = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+        const serverTime = getISTTime();
         await db.run('INSERT INTO private_messages (from_user, to_user, text, time) VALUES (?, ?, ?, ?)',
             [from, to, text, serverTime]);
         
