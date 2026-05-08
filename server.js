@@ -1,4 +1,4 @@
-const express = require('express');
+    const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
@@ -96,10 +96,10 @@ app.get('/user-exists', async (req, res) => {
     res.json({ exists: !!user });
 });
 
-app.post('/api/logout', async (req, res) => {
-    let { sessionId } = req.body;
-    await db.run('DELETE FROM sessions WHERE session_id = ?', [sessionId]);
-    res.json({ success: true });
+app.get('/api/get-pic', async (req, res) => {
+    let { username } = req.query;
+    let user = await db.get('SELECT profile_pic FROM users WHERE username = ?', [username]);
+    res.json({ profilePic: user ? user.profile_pic : null });
 });
 
 app.post('/api/upload-pic', async (req, res) => {
@@ -107,12 +107,6 @@ app.post('/api/upload-pic', async (req, res) => {
     if (!username || !imageData) return res.json({ success: false });
     await db.run('UPDATE users SET profile_pic = ? WHERE username = ?', [imageData, username]);
     res.json({ success: true });
-});
-
-app.get('/api/get-pic', async (req, res) => {
-    let { username } = req.query;
-    let user = await db.get('SELECT profile_pic FROM users WHERE username = ?', [username]);
-    res.json({ profilePic: user ? user.profile_pic : null });
 });
 
 app.post('/api/update-username', async (req, res) => {
@@ -128,7 +122,7 @@ app.post('/api/update-username', async (req, res) => {
     if (existing) return res.json({ success: false, message: 'Username taken' });
     
     let pic = await db.get('SELECT profile_pic FROM users WHERE username = ?', [oldUsername]);
-    await db.run('UPDATE users SET username = ? WHERE username = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE users SET username = ?, profile_pic = ? WHERE username = ?', [newUsername, pic ? pic.profile_pic : null, oldUsername]);
     await db.run('UPDATE sessions SET username = ? WHERE username = ?', [newUsername, oldUsername]);
     await db.run('UPDATE group_members SET username = ? WHERE username = ?', [newUsername, oldUsername]);
     await db.run('UPDATE messages SET username = ? WHERE username = ?', [newUsername, oldUsername]);
