@@ -221,9 +221,11 @@ io.on('connection', (socket) => {
     });
 
     socket.on('send-message', async ({ groupId, msg }) => {
+        const serverTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const messageWithTime = { ...msg, time: serverTime };
         await db.run('INSERT INTO group_messages (groupId, username, text, time) VALUES (?, ?, ?, ?)', 
-            [groupId, msg.user, msg.text, msg.time]);
-        io.to(groupId).emit('new-message', msg);
+            [groupId, msg.user, msg.text, serverTime]);
+        io.to(groupId).emit('new-message', messageWithTime);
     });
 
     socket.on('play-video', async ({ groupId, videoId }) => {
@@ -231,9 +233,10 @@ io.on('connection', (socket) => {
         io.to(groupId).emit('sync-video', { videoId });
     });
 
-    socket.on('private-message', async ({ to, from, text, time }) => {
+    socket.on('private-message', async ({ to, from, text }) => {
+        const serverTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         await db.run('INSERT INTO private_messages (from_user, to_user, text, time) VALUES (?, ?, ?, ?)',
-            [from, to, text, time]);
+            [from, to, text, serverTime]);
         
         let targetSocketId = null;
         for (let [id, username] of onlineUsers.entries()) {
@@ -243,17 +246,15 @@ io.on('connection', (socket) => {
             }
         }
         
+        const messageData = { from, text, time: serverTime };
         if (targetSocketId) {
-            io.to(targetSocketId).emit('private-message', { from, text, time });
+            io.to(targetSocketId).emit('private-message', messageData);
         }
-        socket.emit('private-message-sent', { to, text, time });
+        socket.emit('private-message-sent', { to, text, time: serverTime });
     });
 
-    // ✅ Profile pic update broadcast
     socket.on('profile-pic-updated', async ({ userId, imageData }) => {
-        // Update in database
         await db.run('UPDATE users SET profile_pic = ? WHERE username = ?', [imageData, userId]);
-        // Broadcast to all users in same groups
         if (currentGroup) {
             socket.to(currentGroup).emit('profile-pic-updated', { userId, imageData });
         }
