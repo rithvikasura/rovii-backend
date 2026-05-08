@@ -218,10 +218,24 @@ app.get('/api/friend-requests', async (req, res) => {
     res.json({ requests: requests.map(r => r.from_user) });
 });
 
+// ✅ FIXED: Accept friend with socket notification
 app.post('/api/accept-friend', async (req, res) => {
     let { from, to } = req.body;
     await db.run('UPDATE friend_requests SET status = "accepted" WHERE from_user = ? AND to_user = ?', [from, to]);
     await db.run('INSERT INTO friends (user1, user2) VALUES (?, ?)', [from, to]);
+    
+    // ✅ Send realtime notification to the person who sent request
+    let targetSocketId = null;
+    for (let [id, username] of onlineUsers.entries()) {
+        if (username === from) {
+            targetSocketId = id;
+            break;
+        }
+    }
+    if (targetSocketId) {
+        io.to(targetSocketId).emit('friend-request-accepted', { by: to });
+    }
+    
     res.json({ success: true });
 });
 
