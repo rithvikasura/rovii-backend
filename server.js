@@ -50,7 +50,7 @@ let db;
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     `);
-    console.log('Database ready');
+    console.log('✅ Database ready');
 })();
 
 app.get('/', (req, res) => {
@@ -98,6 +98,29 @@ app.post('/api/logout', async (req, res) => {
     res.json({ success: true });
 });
 
+// Username update endpoint
+app.post('/api/update-username', async (req, res) => {
+    let { oldUsername, newUsername, password } = req.body;
+    if (!oldUsername || !newUsername || newUsername.length < 3) {
+        return res.json({ success: false, message: 'Invalid username' });
+    }
+    let user = await db.get('SELECT password_hash FROM users WHERE username = ?', [oldUsername]);
+    if (!user) return res.json({ success: false, message: 'User not found' });
+    let match = await bcrypt.compare(password, user.password_hash);
+    if (!match) return res.json({ success: false, message: 'Wrong password' });
+    let existing = await db.get('SELECT username FROM users WHERE username = ?', [newUsername]);
+    if (existing) return res.json({ success: false, message: 'Username already taken' });
+    
+    await db.run('UPDATE users SET username = ? WHERE username = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE sessions SET username = ? WHERE username = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE group_members SET username = ? WHERE username = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE messages SET username = ? WHERE username = ?', [newUsername, oldUsername]);
+    await db.run('UPDATE groups SET admin = ? WHERE admin = ?', [newUsername, oldUsername]);
+    
+    res.json({ success: true, newUsername });
+});
+
+// Socket.io events
 io.on('connection', (socket) => {
     let currentUser = null;
     let currentGroup = null;
@@ -110,8 +133,10 @@ io.on('connection', (socket) => {
         socket.join(groupId);
         currentGroup = groupId;
         socket.emit('group-created', groupId);
+        
         let msgs = await db.all('SELECT username, text, time FROM messages WHERE groupId = ? ORDER BY id', [groupId]);
         socket.emit('old-messages', msgs || []);
+        
         const roomSockets = await io.in(groupId).fetchSockets();
         const users = roomSockets.map(s => s.currentUser).filter(Boolean);
         io.to(groupId).emit('online-users', users);
@@ -128,8 +153,10 @@ io.on('connection', (socket) => {
         socket.join(groupId);
         currentGroup = groupId;
         socket.emit('joined-group', groupId);
+        
         let msgs = await db.all('SELECT username, text, time FROM messages WHERE groupId = ? ORDER BY id', [groupId]);
         socket.emit('old-messages', msgs || []);
+        
         const roomSockets = await io.in(groupId).fetchSockets();
         const users = roomSockets.map(s => s.currentUser).filter(Boolean);
         io.to(groupId).emit('online-users', users);
@@ -147,7 +174,8 @@ io.on('connection', (socket) => {
     });
 
     socket.on('send-message', async ({ groupId, msg }) => {
-        await db.run('INSERT INTO messages (groupId, username, text, time) VALUES (?, ?, ?, ?)', [groupId, msg.user, msg.text, msg.time]);
+        await db.run('INSERT INTO messages (groupId, username, text, time) VALUES (?, ?, ?, ?)', 
+            [groupId, msg.user, msg.text, msg.time]);
         io.to(groupId).emit('new-message', msg);
     });
 
@@ -165,4 +193,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Rovii server running on port ${PORT}`));
