@@ -38,8 +38,6 @@ let db;
             groupId TEXT PRIMARY KEY,
             admin TEXT,
             current_video TEXT,
-            current_video_time REAL DEFAULT 0,
-            is_playing INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS group_members (
@@ -203,7 +201,6 @@ app.get('/api/private-messages', async (req, res) => {
     res.json({ messages: msgs });
 });
 
-// Friends API
 app.post('/api/send-friend-request', async (req, res) => {
     let { from, to } = req.body;
     let existingFriend = await db.get('SELECT * FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)', 
@@ -266,7 +263,7 @@ io.on('connection', (socket) => {
     socket.on('create-group', async ({ userId }) => {
         currentUser = userId;
         let groupId = crypto.randomBytes(4).toString('hex');
-        await db.run('INSERT INTO groups (groupId, admin, current_video_time, is_playing) VALUES (?, ?, 0, 1)', [groupId, userId]);
+        await db.run('INSERT INTO groups (groupId, admin) VALUES (?, ?)', [groupId, userId]);
         await db.run('INSERT INTO group_members (groupId, username) VALUES (?, ?)', [groupId, userId]);
         socket.join(groupId);
         currentGroup = groupId;
@@ -276,16 +273,10 @@ io.on('connection', (socket) => {
         let msgs = await db.all('SELECT username, text, time FROM group_messages WHERE groupId = ? ORDER BY id', [groupId]);
         socket.emit('old-messages', msgs || []);
         updateOnlineUsers(groupId);
-        
-        // Send current video state
-        let group = await db.get('SELECT current_video, current_video_time, is_playing FROM groups WHERE groupId = ?', [groupId]);
-        if (group && group.current_video) {
-            socket.emit('sync-video', { videoId: group.current_video, currentTime: group.current_video_time, isPlaying: group.is_playing });
-        }
     });
 
     socket.on('join-group', async ({ groupId, userId }) => {
-        let group = await db.get('SELECT groupId, current_video, current_video_time, is_playing FROM groups WHERE groupId = ?', [groupId]);
+        let group = await db.get('SELECT groupId, current_video FROM groups WHERE groupId = ?', [groupId]);
         if (!group) {
             socket.emit('error', 'Group not found');
             return;
@@ -301,9 +292,8 @@ io.on('connection', (socket) => {
         if(adminCheck) isAdmin = true;
         socket.emit('admin-status', isAdmin);
         
-        // Send current video with time
         if (group.current_video) {
-            socket.emit('sync-video', { videoId: group.current_video, currentTime: group.current_video_time || 0, isPlaying: group.is_playing });
+            socket.emit('sync-video', { videoId: group.current_video });
         }
         
         let msgs = await db.all('SELECT username, text, time FROM group_messages WHERE groupId = ? ORDER BY id', [groupId]);
@@ -315,9 +305,9 @@ io.on('connection', (socket) => {
         currentUser = userId;
         currentGroup = groupId;
         socket.join(groupId);
-        let group = await db.get('SELECT current_video, current_video_time, is_playing FROM groups WHERE groupId = ?', [groupId]);
+        let group = await db.get('SELECT current_video FROM groups WHERE groupId = ?', [groupId]);
         if (group && group.current_video) {
-            socket.emit('sync-video', { videoId: group.current_video, currentTime: group.current_video_time || 0, isPlaying: group.is_playing });
+            socket.emit('sync-video', { videoId: group.current_video });
         }
         let msgs = await db.all('SELECT username, text, time FROM group_messages WHERE groupId = ? ORDER BY id', [groupId]);
         socket.emit('old-messages', msgs || []);
@@ -332,18 +322,9 @@ io.on('connection', (socket) => {
         io.to(groupId).emit('new-message', messageWithTime);
     });
 
-    // ✅ FIXED: Play video with current time
-    socket.on('play-video', async ({ groupId, videoId, currentTime }) => {
-        const timeToSave = currentTime || 0;
-        await db.run('UPDATE groups SET current_video = ?, current_video_time = ?, is_playing = 1 WHERE groupId = ?', 
-            [videoId, timeToSave, groupId]);
-        io.to(groupId).emit('sync-video', { videoId, currentTime: timeToSave, isPlaying: true });
-    });
-
-    // ✅ NEW: Sync video time (when user seeks)
-    socket.on('sync-video-time', async ({ groupId, currentTime, isPlaying }) => {
-        await db.run('UPDATE groups SET current_video_time = ?, is_playing = ? WHERE groupId = ?', [currentTime, isPlaying ? 1 : 0, groupId]);
-        socket.to(groupId).emit('video-time-sync', { currentTime, isPlaying });
+    socket.on('play-video', async ({ groupId, videoId }) => {
+        await db.run('UPDATE groups SET current_video = ? WHERE groupId = ?', [videoId, groupId]);
+        io.to(groupId).emit('sync-video', { videoId });
     });
 
     socket.on('private-message', async ({ to, from, text }) => {
@@ -378,7 +359,6 @@ io.on('connection', (socket) => {
         socket.leave(groupId);
         if (currentGroup === groupId) currentGroup = null;
         updateOnlineUsers(groupId);
-        socket.emit('group-left', groupId);
     });
 
     socket.on('close-group', async ({ groupId }) => {
