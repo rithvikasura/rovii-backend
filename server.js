@@ -50,11 +50,11 @@ let db;
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     `);
-    console.log('✅ Database ready');
+    console.log('Database ready');
 })();
 
 app.get('/', (req, res) => {
-    res.json({ message: 'Rovii Backend is running! ❤️', status: 'ok' });
+    res.json({ message: 'Rovii Backend is running!', status: 'ok' });
 });
 
 app.post('/api/register', async (req, res) => {
@@ -110,10 +110,8 @@ io.on('connection', (socket) => {
         socket.join(groupId);
         currentGroup = groupId;
         socket.emit('group-created', groupId);
-        
         let msgs = await db.all('SELECT username, text, time FROM messages WHERE groupId = ? ORDER BY id', [groupId]);
         socket.emit('old-messages', msgs || []);
-        
         const roomSockets = await io.in(groupId).fetchSockets();
         const users = roomSockets.map(s => s.currentUser).filter(Boolean);
         io.to(groupId).emit('online-users', users);
@@ -130,10 +128,8 @@ io.on('connection', (socket) => {
         socket.join(groupId);
         currentGroup = groupId;
         socket.emit('joined-group', groupId);
-        
         let msgs = await db.all('SELECT username, text, time FROM messages WHERE groupId = ? ORDER BY id', [groupId]);
         socket.emit('old-messages', msgs || []);
-        
         const roomSockets = await io.in(groupId).fetchSockets();
         const users = roomSockets.map(s => s.currentUser).filter(Boolean);
         io.to(groupId).emit('online-users', users);
@@ -151,8 +147,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('send-message', async ({ groupId, msg }) => {
-        await db.run('INSERT INTO messages (groupId, username, text, time) VALUES (?, ?, ?, ?)', 
-            [groupId, msg.user, msg.text, msg.time]);
+        await db.run('INSERT INTO messages (groupId, username, text, time) VALUES (?, ?, ?, ?)', [groupId, msg.user, msg.text, msg.time]);
         io.to(groupId).emit('new-message', msg);
     });
 
@@ -170,4 +165,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Rovii server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
