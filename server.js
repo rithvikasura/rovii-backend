@@ -2,12 +2,17 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
+const { Server } = require('socket.io');
+const http = require('http');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
 
 let db;
 (async () => {
@@ -26,8 +31,26 @@ let db;
             username TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS groups (
+            groupId TEXT PRIMARY KEY,
+            admin TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS group_members (
+            groupId TEXT,
+            username TEXT,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            groupId TEXT,
+            username TEXT,
+            text TEXT,
+            time TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     `);
-    console.log('✅ Rovii database ready');
+    console.log('✅ Database ready');
 })();
 
 app.get('/', (req, res) => {
@@ -38,10 +61,8 @@ app.post('/api/register', async (req, res) => {
     let { username, password } = req.body;
     if (!username || username.length < 3) return res.json({ success: false, message: 'Username min 3 chars' });
     if (!password || password.length < 4) return res.json({ success: false, message: 'Password min 4 chars' });
-    
     let existing = await db.get('SELECT username FROM users WHERE username = ?', [username]);
     if (existing) return res.json({ success: false, message: 'Username taken' });
-    
     let hashed = await bcrypt.hash(password, 10);
     await db.run('INSERT INTO users (username, password_hash) VALUES (?, ?)', [username, hashed]);
     res.json({ success: true });
@@ -51,10 +72,8 @@ app.post('/api/login', async (req, res) => {
     let { username, password } = req.body;
     let user = await db.get('SELECT username, password_hash FROM users WHERE username = ?', [username]);
     if (!user) return res.json({ success: false, message: 'User not found' });
-    
     let match = await bcrypt.compare(password, user.password_hash);
     if (!match) return res.json({ success: false, message: 'Wrong password' });
-    
     let sessionId = crypto.randomBytes(32).toString('hex');
     await db.run('INSERT INTO sessions (session_id, username) VALUES (?, ?)', [sessionId, username]);
     res.json({ success: true, sessionId, username });
@@ -79,5 +98,76 @@ app.post('/api/logout', async (req, res) => {
     res.json({ success: true });
 });
 
+io.on('connection', (socket) => {
+    let currentUser = null;
+    let currentGroup = null;
+
+    socket.on('create-group', async ({ userId }) => {
+        currentUser = userId;
+        let groupId = crypto.randomBytes(4).toString('hex');
+        await db.run('INSERT INTO groups (groupId, admin) VALUES (?, ?)', [groupId, userId]);
+        await db.run('INSERT INTO group_members (groupId, username) VALUES (?, ?)', [groupId, userId]);
+        socket.join(groupId);
+        currentGroup = groupId;
+        socket.emit('group-created', groupId);
+        
+        let msgs = await db.all('SELECT username, text, time FROM messages WHERE groupId = ? ORDER BY id', [groupId]);
+        socket.emit('old-messages', msgs || []);
+        
+        const roomSockets = await io.in(groupId).fetchSockets();
+        const users = roomSockets.map(s => s.currentUser).filter(Boolean);
+        io.to(groupId).emit('online-users', users);
+    });
+
+    socket.on('join-group', async ({ groupId, userId }) => {
+        let group = await db.get('SELECT groupId FROM groups WHERE groupId = ?', [groupId]);
+        if (!group) {
+            socket.emit('error', 'Group not found');
+            return;
+        }
+        currentUser = userId;
+        await db.run('INSERT OR IGNORE INTO group_members (groupId, username) VALUES (?, ?)', [groupId, userId]);
+        socket.join(groupId);
+        currentGroup = groupId;
+        socket.emit('joined-group', groupId);
+        
+        let msgs = await db.all('SELECT username, text, time FROM messages WHERE groupId = ? ORDER BY id', [groupId]);
+        socket.emit('old-messages', msgs || []);
+        
+        const roomSockets = await io.in(groupId).fetchSockets();
+        const users = roomSockets.map(s => s.currentUser).filter(Boolean);
+        io.to(groupId).emit('online-users', users);
+    });
+
+    socket.on('rejoin-group', async ({ groupId, userId }) => {
+        currentUser = userId;
+        currentGroup = groupId;
+        socket.join(groupId);
+        let msgs = await db.all('SELECT username, text, time FROM messages WHERE groupId = ? ORDER BY id', [groupId]);
+        socket.emit('old-messages', msgs || []);
+        const roomSockets = await io.in(groupId).fetchSockets();
+        const users = roomSockets.map(s => s.currentUser).filter(Boolean);
+        io.to(groupId).emit('online-users', users);
+    });
+
+    socket.on('send-message', async ({ groupId, msg }) => {
+        await db.run('INSERT INTO messages (groupId, username, text, time) VALUES (?, ?, ?, ?)', 
+            [groupId, msg.user, msg.text, msg.time]);
+        io.to(groupId).emit('new-message', msg);
+    });
+
+    socket.on('play-video', ({ groupId, videoId }) => {
+        io.to(groupId).emit('sync-video', { videoId });
+    });
+
+    socket.on('disconnect', async () => {
+        if (currentGroup && currentUser) {
+            const roomSockets = await io.in(currentGroup).fetchSockets();
+            const users = roomSockets.map(s => s.currentUser).filter(Boolean);
+            io.to(currentGroup).emit('online-users', users);
+        }
+    });
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Rovii server on port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Rovii server running on port ${PORT}`));
