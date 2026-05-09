@@ -123,6 +123,7 @@ app.post('/api/login', async (req, res) => {
         let match = await bcrypt.compare(password, user.password_hash);
         if (!match) return res.json({ success: false, message: 'Wrong password' });
         let sessionId = crypto.randomBytes(32).toString('hex');
+        // Delete old sessions for this user
         await db.run('DELETE FROM sessions WHERE username = ?', [username]);
         await db.run('INSERT INTO sessions (session_id, username) VALUES (?, ?)', [sessionId, username]);
         res.json({ success: true, sessionId, username, profilePic: user.profile_pic || null });
